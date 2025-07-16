@@ -232,4 +232,36 @@ class AIService:
             return True
         except Exception as e:
             logger.error(f"Error setting model: {e}")
+            return False
+    
+    def health_check(self) -> bool:
+        """Check if the AI service is healthy and can respond."""
+        try:
+            if self.provider == "openai":
+                # Test OpenAI connection
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": "test"}],
+                    max_tokens=1
+                )
+                return True
+            elif self.provider == "anthropic":
+                # Test Anthropic connection
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "test"}]
+                )
+                return True
+            elif self.provider == "ollama":
+                # Test Ollama connection
+                response = self.client.generate(
+                    model=self.model,
+                    prompt="test",
+                    options={"num_predict": 1}
+                )
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"AI service health check failed: {e}")
             return False 

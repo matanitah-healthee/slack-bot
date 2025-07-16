@@ -56,6 +56,11 @@ class SlackBot:
                     # Get AI response
                     if self.ai_service:
                         try:
+                            # Check if AI service is healthy before processing
+                            if hasattr(self.ai_service, 'health_check') and not self.ai_service.health_check():
+                                say("🔄 I'm currently offline as Ollama service is not available. Please try again when Ollama is running.")
+                                return
+                            
                             response = self.ai_service.get_response(text, user_id)
                             say(response)
                         except Exception as e:
@@ -81,6 +86,11 @@ class SlackBot:
                 
                 if self.ai_service:
                     try:
+                        # Check if AI service is healthy before processing
+                        if hasattr(self.ai_service, 'health_check') and not self.ai_service.health_check():
+                            say("🔄 I'm currently offline as Ollama service is not available. Please try again when Ollama is running.")
+                            return
+                        
                         response = self.ai_service.get_response(text, user_id)
                         say(response)
                     except Exception as e:
@@ -107,6 +117,11 @@ class SlackBot:
                 
                 if self.ai_service:
                     try:
+                        # Check if AI service is healthy before processing
+                        if hasattr(self.ai_service, 'health_check') and not self.ai_service.health_check():
+                            respond("🔄 I'm currently offline as Ollama service is not available. Please try again when Ollama is running.")
+                            return
+                        
                         response = self.ai_service.get_response(text, user_id)
                         respond(response)
                     except Exception as e:

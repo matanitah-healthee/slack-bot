@@ -19,6 +19,8 @@ class SlackIntegration:
         self.slack_bot: Optional[SlackBot] = None
         self.is_running = False
         self.bot_thread: Optional[threading.Thread] = None
+        self.health_monitor_thread: Optional[threading.Thread] = None
+        self.ollama_healthy = True
         
     def initialize(self) -> bool:
         """Initialize all services."""
@@ -57,6 +59,11 @@ class SlackIntegration:
             # Start the bot in a separate thread
             self.bot_thread = threading.Thread(target=self._run_bot, daemon=True)
             self.bot_thread.start()
+            
+            # Start health monitoring for Ollama
+            if config.get_ai_provider() == "ollama":
+                self.health_monitor_thread = threading.Thread(target=self._monitor_ollama_health, daemon=True)
+                self.health_monitor_thread.start()
             
             # Give it a moment to start
             time.sleep(2)
@@ -107,9 +114,50 @@ class SlackIntegration:
             logger.error(f"Error running Slack bot: {e}")
             self.is_running = False
     
+    def _monitor_ollama_health(self):
+        """Monitor Ollama health and update bot presence accordingly."""
+        logger.info("Starting Ollama health monitoring...")
+        
+        while self.is_running:
+            try:
+                if self.ai_service:
+                    # Check if Ollama is healthy
+                    is_healthy = self.ai_service.health_check()
+                    
+                    if is_healthy != self.ollama_healthy:
+                        self.ollama_healthy = is_healthy
+                        self._update_bot_presence()
+                        
+                        if is_healthy:
+                            logger.info("✅ Ollama is healthy - bot is now online")
+                        else:
+                            logger.warning("❌ Ollama is unhealthy - bot is now away")
+                
+                # Check at configurable interval
+                time.sleep(config.OLLAMA_HEALTH_CHECK_INTERVAL)
+                
+            except Exception as e:
+                logger.error(f"Error in Ollama health monitoring: {e}")
+                time.sleep(config.OLLAMA_HEALTH_CHECK_INTERVAL)
+    
+    def _update_bot_presence(self):
+        """Update bot presence based on Ollama health."""
+        try:
+            if self.slack_bot and self.slack_bot.app:
+                if self.ollama_healthy:
+                    # Set bot as active/online
+                    self.slack_bot.app.client.users_setPresence(presence="auto")
+                    logger.info("Bot presence set to online (Ollama healthy)")
+                else:
+                    # Set bot as away
+                    self.slack_bot.app.client.users_setPresence(presence="away")
+                    logger.info("Bot presence set to away (Ollama unhealthy)")
+        except Exception as e:
+            logger.error(f"Error updating bot presence: {e}")
+    
     def get_status(self) -> dict:
         """Get the current status of the integration."""
-        return {
+        status = {
             "is_running": self.is_running,
             "ai_service_initialized": self.ai_service is not None,
             "slack_bot_initialized": self.slack_bot is not None,
@@ -117,6 +165,13 @@ class SlackIntegration:
             "ai_provider": config.get_ai_provider() if self.ai_service else None,
             "bot_info": self.slack_bot.get_bot_info() if self.slack_bot else None
         }
+        
+        # Add Ollama health status for Ollama provider
+        if config.get_ai_provider() == "ollama":
+            status["ollama_healthy"] = self.ollama_healthy
+            status["health_monitoring_active"] = self.health_monitor_thread is not None and self.health_monitor_thread.is_alive()
+        
+        return status
     
     def get_ai_stats(self) -> dict:
         """Get AI service statistics."""

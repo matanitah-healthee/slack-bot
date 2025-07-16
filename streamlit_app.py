@@ -140,6 +140,21 @@ def render_dashboard():
         total_messages = ai_stats.get("total_messages", 0)
         st.metric("Total Messages", total_messages)
     
+    # Ollama health status for Ollama provider
+    if status.get("ai_provider") == "ollama":
+        st.subheader("🏥 Ollama Health Status")
+        if slack_integration.ai_service:
+            try:
+                is_healthy = slack_integration.ai_service.health_check()
+                if is_healthy:
+                    st.success("✅ Ollama is healthy and responding")
+                else:
+                    st.error("❌ Ollama is not responding - bot will appear offline")
+            except Exception as e:
+                st.warning(f"⚠️ Could not check Ollama health: {e}")
+        else:
+            st.info("AI service not initialized")
+    
     # Bot information
     if status["bot_info"]:
         st.subheader("🤖 Bot Information")
@@ -242,11 +257,14 @@ def render_settings():
     selected_model = st.selectbox("AI Model", models, index=models.index(current_model) if current_model in models else 0)
     
     if st.button("Update Model"):
-        success = slack_integration.set_ai_model(selected_model)
-        if success:
-            st.success(f"Model updated to {selected_model}")
+        if selected_model:
+            success = slack_integration.set_ai_model(selected_model)
+            if success:
+                st.success(f"Model updated to {selected_model}")
+            else:
+                st.error("Failed to update model")
         else:
-            st.error("Failed to update model")
+            st.error("Please select a model")
     
     # Configuration display
     st.subheader("📋 Current Configuration")

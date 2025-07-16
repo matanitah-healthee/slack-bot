@@ -20,6 +20,7 @@ class Config:
     # Ollama Configuration
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama2")
+    OLLAMA_HEALTH_CHECK_INTERVAL: int = int(os.getenv("OLLAMA_HEALTH_CHECK_INTERVAL", "30"))
     
     # Application Settings
     PORT: int = int(os.getenv("PORT", "3000"))
