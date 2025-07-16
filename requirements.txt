@@ -3,10 +3,10 @@ slack-bolt==1.18.1
 streamlit==1.31.0
 openai==1.12.0
 anthropic==0.18.1
-ollama==0.1.7
+ollama
 python-dotenv==1.0.1
 requests==2.31.0
-fastapi==0.109.2
+fastapi
 uvicorn==0.27.1
 pydantic
 
@@ -15,7 +15,11 @@ pg8000==1.31.2
 pgvector==0.2.4
 
 # Graph database
-neo4j==5.16.0
+neo4j
+
+# GraphRAG and MCP
+neo4j-graphrag[ollama,openai,anthropic]
+fastmcp
 
 # Embeddings and text processing
 sentence-transformers==2.7.0

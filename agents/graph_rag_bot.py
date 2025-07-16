@@ -1,115 +1,132 @@
 import logging
 import asyncio
 import json
-import re
+import ollama
 from typing import Dict, Any, Optional, List
-from neo4j import AsyncGraphDatabase
+from fastmcp import FastMCP, Context
+from neo4j import GraphDatabase
+from neo4j_graphrag.generation import GraphRAG
+from neo4j_graphrag.retrievers import VectorRetriever, Text2CypherRetriever, HybridRetriever
+from neo4j_graphrag.llm import LLMInterface, LLMResponse
+from neo4j_graphrag.embeddings import Embedder
+from neo4j_graphrag.indexes import create_vector_index, create_fulltext_index
 from .abstract_agent import AbstractAgent
 from config import config
 
 logger = logging.getLogger(__name__)
 
+class CustomOllamaLLM(LLMInterface):
+    """Custom Ollama LLM implementation for neo4j-graphrag compatibility."""
+    
+    def __init__(self, model_name: str, host: str = "http://localhost:11434", **kwargs):
+        self.model_name = model_name
+        self.host = host
+        self.kwargs = kwargs
+    
+    def invoke(self, input_text: str) -> LLMResponse:
+        """Synchronous invoke method."""
+        try:
+            # Convert kwargs to options format for ollama.chat
+            options = {}
+            if 'temperature' in self.kwargs:
+                options['temperature'] = self.kwargs['temperature']
+            if 'num_predict' in self.kwargs:
+                options['num_predict'] = self.kwargs['num_predict']
+            
+            response = ollama.chat(
+                model=self.model_name,
+                messages=[{"role": "user", "content": input_text}],
+                options=options if options else None
+            )
+            return LLMResponse(content=response["message"]["content"])
+        except Exception as e:
+            logger.error(f"Ollama LLM error: {e}")
+            return LLMResponse(content="Error generating response")
+    
+    async def ainvoke(self, input_text: str) -> LLMResponse:
+        """Async invoke method - just calls sync version."""
+        return self.invoke(input_text)
+
+class CustomOllamaEmbeddings(Embedder):
+    """Custom Ollama embeddings implementation for neo4j-graphrag compatibility."""
+    
+    def __init__(self, model: str = "nomic-embed-text", host: str = "http://localhost:11434"):
+        self.model = model
+        self.host = host
+    
+    def embed_query(self, text: str) -> List[float]:
+        """Synchronous embedding method."""
+        try:
+            response = ollama.embeddings(model=self.model, prompt=text)
+            return response["embedding"]
+        except Exception as e:
+            logger.error(f"Ollama embeddings error: {e}")
+            return []
+    
+    async def aembed_query(self, text: str) -> List[float]:
+        """Async embedding method."""
+        return self.embed_query(text)
+
 class GraphRagBot(AbstractAgent):
     """
-    Agentic Graph RAG Bot that uses Ollama with Neo4j for intelligent graph analysis.
+    Modern Graph RAG Bot using neo4j-graphrag and fastmcp libraries.
+    Provides intelligent graph analysis through standardized MCP tools.
     """
     
-    def __init__(self, name: str = "Graph RAG Bot", description: str = "Agentic Graph RAG Bot with Neo4j Knowledge Graph", agent_config: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "Modern Graph RAG Bot", description: str = "Advanced Graph RAG with neo4j-graphrag and fastmcp", agent_config: Optional[Dict[str, Any]] = None):
         super().__init__(name, description, agent_config)
         
-        # Neo4j connection
+        # Core components
         self.neo4j_driver = None
-        self.ollama_client = None
+        self.llm = None
+        self.embedder = None
+        self.graph_rag = None
+        self.vector_retriever = None
+        self.text2cypher_retriever = None
+        self.hybrid_retriever = None
+        self.mcp_server = None
         self.initialized = False
         
-        # Available tools for the agent
-        self.available_tools = [
-            {
-                "name": "get_neo4j_schema",
-                "description": "Get the current Neo4j graph schema including nodes, relationships, and properties",
-                "parameters": []
-            },
-            {
-                "name": "read_neo4j_cypher",
-                "description": "Execute a read-only Cypher query on the Neo4j database",
-                "parameters": ["query", "params (optional JSON string)"]
-            },
-            {
-                "name": "write_neo4j_cypher", 
-                "description": "Execute a write Cypher query on the Neo4j database",
-                "parameters": ["query", "params (optional JSON string)"]
-            }
-        ]
+        # Vector index configuration
+        self.vector_index_name = "graph_rag_chunks"
+        self.fulltext_index_name = "graph_rag_fulltext"
         
-        # System prompt for agentic behavior with Ollama
-        self.system_prompt = """You are a Graph RAG expert that helps answer questions using a Neo4j knowledge graph.
-
-WORKFLOW:
-1. First, get the current Neo4j schema to understand the graph structure
-2. Analyze the user's question and identify relevant nodes/relationships  
-3. Formulate appropriate Cypher queries to find relevant information
-4. Execute the queries using the available tools
-5. Synthesize the results into a comprehensive answer
-
-TOOL CALLING FORMAT:
-To call a tool, use this exact format:
-TOOL_CALL: <tool_name>
-PARAMETERS: <parameter_values>
-END_TOOL_CALL
-
-Available tools:
-- get_neo4j_schema: Get the current graph schema (no parameters needed)
-- read_neo4j_cypher: Execute read-only Cypher queries (parameters: query, params)
-- write_neo4j_cypher: Execute write Cypher queries (parameters: query, params)
-
-Examples:
-TOOL_CALL: get_neo4j_schema
-END_TOOL_CALL
-
-TOOL_CALL: read_neo4j_cypher
-PARAMETERS: {"query": "MATCH (n:Company) RETURN n.name LIMIT 5"}
-END_TOOL_CALL
-
-TOOL_CALL: write_neo4j_cypher
-PARAMETERS: {"query": "MERGE (c:Concept {name: $name})", "params": "{\\"name\\": \\"AI\\"}"}
-END_TOOL_CALL
-
-GUIDELINES:
-- Always start by getting the schema to understand what data is available
-- Write efficient Cypher queries that target the specific information needed
-- Use LIMIT clauses to avoid returning too much data
-- Explain your reasoning and show the query results
-- Provide a clear, comprehensive answer based on the graph data
-- When you execute queries, interpret the results and provide insights
-- Be conversational and helpful in your explanations
-"""
-    
     async def initialize(self) -> bool:
-        """Initialize the Graph RAG bot with Neo4j and Ollama."""
-        self.logger.info("Initializing Agentic Graph RAG bot...")
+        """Initialize the Modern Graph RAG bot with neo4j-graphrag and fastmcp."""
+        self.logger.info("Initializing Modern Graph RAG bot...")
         
         try:
-            # Initialize Neo4j connection
-            self.neo4j_driver = AsyncGraphDatabase.driver(
+            # Initialize Neo4j connection (synchronous driver for neo4j-graphrag)
+            self.neo4j_driver = GraphDatabase.driver(
                 config.NEO4J_URI,
                 auth=(config.NEO4J_USER, config.NEO4J_PASSWORD)
             )
             
-            # Test connection
-            async with self.neo4j_driver.session() as session:
-                await session.run("RETURN 1")
+            # Test Neo4j connection
+            await self._test_neo4j_connection()
             
-            # Initialize Ollama client
-            try:
-                import ollama
-                self.ollama_client = ollama.Client(host=config.OLLAMA_BASE_URL)
-                # Test Ollama connection
-                self.ollama_client.list()
-            except ImportError:
-                raise ImportError("Ollama package not installed. Run: pip install ollama")
-            except Exception as e:
-                self.logger.error(f"Failed to connect to Ollama: {e}")
-                return False
+            # Initialize LLM with custom Ollama implementation
+            self.llm = CustomOllamaLLM(
+                model_name=config.OLLAMA_MODEL,
+                host=config.OLLAMA_BASE_URL,
+                temperature=0.7,
+                num_predict=2000,
+            )
+            
+            # Initialize embedder with custom implementation (use dedicated embedding model)
+            self.embedder = CustomOllamaEmbeddings(
+                model="nomic-embed-text",  # Use dedicated embedding model
+                host=config.OLLAMA_BASE_URL
+            )
+            
+            # Setup vector indexes if they don't exist
+            await self._setup_indexes()
+            
+            # Initialize retrievers
+            await self._initialize_retrievers()
+            
+            # Initialize FastMCP server
+            await self._initialize_mcp_server()
             
             # Load sample content if graph is empty
             node_count = await self._get_node_count()
@@ -117,313 +134,373 @@ GUIDELINES:
                 await self._load_sample_content()
             
             self.initialized = True
-            self.logger.info(f"Agentic Graph RAG bot initialized successfully with {node_count} nodes")
+            self.logger.info(f"Modern Graph RAG bot initialized successfully with {node_count} nodes")
             return True
             
         except Exception as e:
-            self.logger.error(f"Error initializing Agentic Graph RAG bot: {e}")
+            self.logger.error(f"Error initializing Modern Graph RAG bot: {e}")
             return False
     
+    async def _test_neo4j_connection(self):
+        """Test Neo4j connection."""
+        if not self.neo4j_driver:
+            raise RuntimeError("Neo4j driver not initialized")
+        with self.neo4j_driver.session() as session:
+            session.run("RETURN 1")
+    
+    async def _setup_indexes(self):
+        """Setup necessary vector and fulltext indexes."""
+        try:
+            if not self.neo4j_driver:
+                raise RuntimeError("Neo4j driver not initialized")
+                
+            # Create vector index for embeddings
+            create_vector_index(
+                self.neo4j_driver,
+                self.vector_index_name,
+                label="Chunk",
+                embedding_property="embedding",
+                dimensions=768,  # nomic-embed-text embedding dimension
+                similarity_fn="cosine"
+            )
+            
+            # Create fulltext index for text search
+            create_fulltext_index(
+                self.neo4j_driver,
+                self.fulltext_index_name,
+                label="Chunk",
+                node_properties=["text"]
+            )
+            
+            self.logger.info("Vector and fulltext indexes created successfully")
+            
+        except Exception as e:
+            # Indexes might already exist, which is fine
+            self.logger.debug(f"Index creation note: {e}")
+    
+    async def _initialize_retrievers(self):
+        """Initialize different types of retrievers."""
+        if not self.neo4j_driver or not self.llm or not self.embedder:
+            raise RuntimeError("Required components not initialized")
+            
+        # Vector retriever for semantic search
+        self.vector_retriever = VectorRetriever(
+            driver=self.neo4j_driver,
+            index_name=self.vector_index_name,
+            embedder=self.embedder,
+            return_properties=["text", "source"]
+        )
+        
+        # Text2Cypher retriever for natural language to Cypher
+        schema = await self._get_neo4j_schema()
+        self.text2cypher_retriever = Text2CypherRetriever(
+            driver=self.neo4j_driver,
+            llm=self.llm,
+            neo4j_schema=schema
+        )
+        
+        # Hybrid retriever combining vector and fulltext search
+        self.hybrid_retriever = HybridRetriever(
+            driver=self.neo4j_driver,
+            vector_index_name=self.vector_index_name,
+            fulltext_index_name=self.fulltext_index_name,
+            embedder=self.embedder
+        )
+        
+        # Initialize main GraphRAG with vector retriever as default
+        self.graph_rag = GraphRAG(
+            retriever=self.vector_retriever,
+            llm=self.llm
+        )
+    
+    async def _initialize_mcp_server(self):
+        """Initialize FastMCP server with graph analysis tools."""
+        self.mcp_server = FastMCP(
+            name="GraphRAG Analysis"
+        )
+        
+        # Register MCP tools
+        self._register_mcp_tools()
+    
+    def _register_mcp_tools(self):
+        """Register MCP tools for graph analysis."""
+        if not self.mcp_server:
+            return
+            
+        @self.mcp_server.tool()
+        async def semantic_search(query: str, top_k: int = 5, ctx: Optional[Context] = None) -> dict:
+            """Perform semantic search using vector embeddings."""
+            if ctx:
+                await ctx.info(f"Performing semantic search for: {query}")
+            
+            try:
+                result = self.graph_rag.search(
+                    query_text=query,
+                    retriever_config={"top_k": top_k},
+                    return_context=True
+                )
+                
+                if ctx:
+                    await ctx.info("Semantic search completed successfully")
+                return {
+                    "answer": result.answer,
+                    "context": [item.content for item in result.retriever_result.items] if result.retriever_result else [],
+                    "method": "semantic_search"
+                }
+            except Exception as e:
+                if ctx:
+                    await ctx.error(f"Semantic search failed: {str(e)}")
+                return {"error": str(e)}
+        
+        @self.mcp_server.tool()
+        async def cypher_query(question: str, ctx: Optional[Context] = None) -> dict:
+            """Convert natural language to Cypher query and execute it."""
+            if ctx:
+                await ctx.info(f"Converting question to Cypher: {question}")
+            
+            try:
+                # Use Text2Cypher retriever
+                result = self.text2cypher_retriever.search(query_text=question)
+                
+                # Also get LLM interpretation
+                rag_result = GraphRAG(
+                    retriever=self.text2cypher_retriever,
+                    llm=self.llm
+                ).search(query_text=question, return_context=True)
+                
+                if ctx:
+                    await ctx.info("Cypher query executed successfully")
+                return {
+                    "answer": rag_result.answer,
+                    "raw_results": [item.content for item in result.items] if result.items else [],
+                    "method": "cypher_query"
+                }
+            except Exception as e:
+                if ctx:
+                    await ctx.error(f"Cypher query failed: {str(e)}")
+                return {"error": str(e)}
+        
+        @self.mcp_server.tool()
+        async def hybrid_search(query: str, top_k: int = 5, alpha: float = 0.5, ctx: Optional[Context] = None) -> dict:
+            """Perform hybrid search combining vector and fulltext search."""
+            if ctx:
+                await ctx.info(f"Performing hybrid search for: {query}")
+            
+            try:
+                rag_result = GraphRAG(
+                    retriever=self.hybrid_retriever,
+                    llm=self.llm
+                ).search(
+                    query_text=query,
+                    retriever_config={"top_k": top_k, "alpha": alpha},
+                    return_context=True
+                )
+                
+                if ctx:
+                    await ctx.info("Hybrid search completed successfully")
+                return {
+                    "answer": rag_result.answer,
+                    "context": [item.content for item in rag_result.retriever_result.items] if rag_result.retriever_result else [],
+                    "method": "hybrid_search"
+                }
+            except Exception as e:
+                if ctx:
+                    await ctx.error(f"Hybrid search failed: {str(e)}")
+                return {"error": str(e)}
+        
+        @self.mcp_server.tool()
+        async def get_graph_schema(ctx: Optional[Context] = None) -> dict:
+            """Get the current Neo4j graph schema."""
+            if ctx:
+                await ctx.info("Retrieving graph schema")
+            
+            try:
+                schema = await self._get_neo4j_schema()
+                if ctx:
+                    await ctx.info("Schema retrieved successfully")
+                return {"schema": schema, "method": "get_schema"}
+            except Exception as e:
+                if ctx:
+                    await ctx.error(f"Schema retrieval failed: {str(e)}")
+                return {"error": str(e)}
+        
+        @self.mcp_server.tool()
+        async def analyze_concept(concept: str, method: str = "semantic", ctx: Optional[Context] = None) -> dict:
+            """Analyze a specific concept using the specified method."""
+            if ctx:
+                await ctx.info(f"Analyzing concept '{concept}' using {method} method")
+            
+            try:
+                if method == "semantic":
+                    retriever = self.vector_retriever
+                elif method == "cypher":
+                    retriever = self.text2cypher_retriever
+                elif method == "hybrid":
+                    retriever = self.hybrid_retriever
+                else:
+                    raise ValueError(f"Unknown method: {method}")
+                
+                rag_result = GraphRAG(
+                    retriever=retriever,
+                    llm=self.llm
+                ).search(
+                    query_text=f"Tell me everything about {concept} and its relationships",
+                    retriever_config={"top_k": 10},
+                    return_context=True
+                )
+                
+                if ctx:
+                    await ctx.info(f"Concept analysis completed using {method}")
+                return {
+                    "concept": concept,
+                    "analysis": rag_result.answer,
+                    "context": [item.content for item in rag_result.retriever_result.items] if rag_result.retriever_result else [],
+                    "method": method
+                }
+            except Exception as e:
+                if ctx:
+                    await ctx.error(f"Concept analysis failed: {str(e)}")
+                return {"error": str(e)}
+    
     async def invoke(self, user_message: str) -> str:
-        """Invoke the agentic Graph RAG bot to process queries."""
-        self.logger.info(f"Agentic Graph RAG bot processing message: {user_message}")
+        """Main entry point for processing user queries."""
+        self.logger.info(f"Modern Graph RAG bot processing message: {user_message}")
         
         if not self.initialized:
             success = await self.initialize()
             if not success:
-                return "❌ Agentic Graph RAG bot initialization failed. Please check Neo4j connection and Ollama service."
+                return "❌ Modern Graph RAG bot initialization failed. Please check Neo4j connection and Ollama service."
         
         try:
-            # Start conversation with system prompt
-            conversation_history = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_message}
-            ]
+            # Use the main GraphRAG for general queries (synchronous call)
+            result = self.graph_rag.search(
+                query_text=user_message,
+                retriever_config={"top_k": 5},
+                return_context=True
+            )
             
-            # Run agentic loop with tool calls
-            max_iterations = 10
-            iteration = 0
+            # Format response
+            context_items = [item.content for item in result.retriever_result.items] if result.retriever_result else []
             
-            while iteration < max_iterations:
-                iteration += 1
-                
-                # Create conversation prompt for Ollama
-                prompt = self._format_conversation_for_ollama(conversation_history)
-                
-                # Call Ollama
-                if not self.ollama_client:
-                    return "❌ Ollama client not initialized"
-                
-                response = self.ollama_client.generate(
-                    model=config.OLLAMA_MODEL,
-                    prompt=prompt,
-                    options={
-                        "temperature": 0.7,
-                        "num_predict": 2000,
-                    }
-                )
-                
-                assistant_response = response['response'] if isinstance(response, dict) and 'response' in response else ''
-                
-                # Add assistant response to conversation
-                conversation_history.append({
-                    "role": "assistant", 
-                    "content": assistant_response
-                })
-                
-                # Check for tool calls in the response
-                tool_calls = self._extract_tool_calls(assistant_response)
-                
-                if not tool_calls:
-                    # No more tool calls, return final response
-                    return f"""🤖 **Agentic Graph RAG Response**
+            return f"""🤖 **Modern Graph RAG Response**
 
 **Your Question:** {user_message}
 
-**Analysis & Results:**
-{assistant_response}
+**Answer:** {result.answer}
+
+**Sources:** Found {len(context_items)} relevant context items
 
 ---
-*This response was generated using agentic workflow with Neo4j graph analysis via Ollama*
-"""
-                
-                # Execute tool calls
-                for tool_call in tool_calls:
-                    tool_name = tool_call.get("name")
-                    tool_params = tool_call.get("parameters", {})
-                    
-                    # Execute the tool
-                    if tool_name:
-                        result = await self._execute_tool(tool_name, tool_params)
-                    else:
-                        result = "Error: Tool name not specified"
-                    
-                    # Add tool result to conversation
-                    conversation_history.append({
-                        "role": "system",
-                        "content": f"TOOL_RESULT for {tool_name}: {result}"
-                    })
-            
-            # If we reach max iterations, return what we have
-            return f"""🤖 **Agentic Graph RAG Response** (Max iterations reached)
-
-**Your Question:** {user_message}
-
-**Analysis & Results:**
-The agentic analysis completed {max_iterations} iterations. Here's what was found:
-
-{conversation_history[-2].get('content', 'Analysis in progress...')}
-
----
-*This response was generated using agentic workflow with Neo4j graph analysis via Ollama*
+*Powered by neo4j-graphrag and fastmcp*
 """
             
         except Exception as e:
-            self.logger.error(f"Error in Agentic Graph RAG bot invoke: {e}")
+            self.logger.error(f"Error in Modern Graph RAG bot invoke: {e}")
             return f"❌ Error processing your query: {str(e)}"
     
-    def _format_conversation_for_ollama(self, conversation: List[Dict[str, str]]) -> str:
-        """Format conversation history for Ollama prompt."""
-        prompt = ""
-        for msg in conversation:
-            role = msg["role"]
-            content = msg["content"]
-            
-            if role == "system":
-                prompt += f"System: {content}\n\n"
-            elif role == "user":
-                prompt += f"Human: {content}\n\n"
-            elif role == "assistant":
-                prompt += f"Assistant: {content}\n\n"
-        
-        prompt += "Assistant: "
-        return prompt
-    
-    def _extract_tool_calls(self, response: str) -> List[Dict[str, Any]]:
-        """Extract tool calls from Ollama response text."""
-        tool_calls = []
-        
-        # Pattern to match TOOL_CALL blocks
-        pattern = r'TOOL_CALL:\s*(\w+)\s*(?:PARAMETERS:\s*(.+?))?\s*END_TOOL_CALL'
-        matches = re.findall(pattern, response, re.DOTALL | re.IGNORECASE)
-        
-        for match in matches:
-            tool_name = match[0].strip()
-            params_str = match[1].strip() if match[1] else "{}"
-            
-            # Parse parameters
-            try:
-                if params_str and params_str != "":
-                    # Try to parse as JSON
-                    parameters = json.loads(params_str)
-                else:
-                    parameters = {}
-            except json.JSONDecodeError:
-                # If not valid JSON, treat as empty parameters
-                parameters = {}
-            
-            tool_calls.append({
-                "name": tool_name,
-                "parameters": parameters
-            })
-        
-        return tool_calls
-    
-    async def _execute_tool(self, function_name: str, function_args: Dict[str, Any]) -> str:
-        """Execute a tool function and return the result."""
+    async def _get_neo4j_schema(self) -> str:
+        """Get Neo4j schema for Text2Cypher retriever."""
         try:
-            if function_name == "get_neo4j_schema":
-                return await self._get_schema()
-            elif function_name == "read_neo4j_cypher":
-                query = function_args.get("query", "")
-                params = function_args.get("params", "{}")
-                return await self._execute_read_query(query, params)
-            elif function_name == "write_neo4j_cypher":
-                query = function_args.get("query", "")
-                params = function_args.get("params", "{}")
-                return await self._execute_write_query(query, params)
-            else:
-                return f"Unknown function: {function_name}"
+            with self.neo4j_driver.session() as session:
+                # Get node labels
+                result = session.run("CALL db.labels() YIELD label RETURN collect(label) as labels")
+                labels_record = result.single()
+                labels = labels_record["labels"] if labels_record else []
+                
+                # Get relationship types
+                result = session.run("CALL db.relationshipTypes() YIELD relationshipType RETURN collect(relationshipType) as types")
+                types_record = result.single()
+                rel_types = types_record["types"] if types_record else []
+                
+                # Build schema string
+                schema = f"""
+Node Labels: {', '.join(labels)}
+Relationship Types: {', '.join(rel_types)}
+
+Sample patterns:
+(:Company)-[:OFFERS]->(:Feature)
+(:Company)-[:SERVES]->(:Stakeholder)
+(:Feature)-[:ASSISTS]->(:Stakeholder)
+"""
+                return schema
         except Exception as e:
-            return f"Error executing {function_name}: {str(e)}"
-    
-    async def _get_schema(self) -> str:
-        """Get the Neo4j schema."""
-        try:
-            async with self.neo4j_driver.session() as session:
-                # Try APOC first, fallback to basic queries
-                try:
-                    result = await session.run("CALL apoc.meta.schema()")
-                    record = await result.single()
-                    if record:
-                        schema = record['value']
-                        return json.dumps(schema, default=str, indent=2)
-                except:
-                    pass
-                
-                # Basic schema query
-                result = await session.run("CALL db.labels() YIELD label RETURN collect(label) as node_labels")
-                labels_record = await result.single()
-                
-                result = await session.run("CALL db.relationshipTypes() YIELD relationshipType RETURN collect(relationshipType) as relationship_types")
-                rels_record = await result.single()
-                
-                schema = {
-                    "node_labels": labels_record["node_labels"] if labels_record else [],
-                    "relationship_types": rels_record["relationship_types"] if rels_record else []
-                }
-                
-                return json.dumps(schema, indent=2)
-        except Exception as e:
-            return f"Error getting schema: {e}"
-    
-    async def _execute_read_query(self, query: str, params: str = "{}") -> str:
-        """Execute a read-only Cypher query."""
-        try:
-            # Validate it's a read query
-            if not self._is_read_query(query):
-                return "Error: Only read queries (MATCH, RETURN, etc.) are allowed"
-            
-            parsed_params = json.loads(params) if params else {}
-            
-            async with self.neo4j_driver.session() as session:
-                result = await session.run(query, parsed_params)
-                records = await result.to_eager_result()
-                
-                # Convert to list of dictionaries
-                data = [record.data() for record in records.records]
-                
-                return json.dumps(data, default=str, indent=2)
-        except Exception as e:
-            return f"Error executing read query: {e}"
-    
-    async def _execute_write_query(self, query: str, params: str = "{}") -> str:
-        """Execute a write Cypher query."""
-        try:
-            # Validate it's a write query
-            if not self._is_write_query(query):
-                return "Error: Only write queries (CREATE, MERGE, SET, DELETE, etc.) are allowed"
-            
-            parsed_params = json.loads(params) if params else {}
-            
-            async with self.neo4j_driver.session() as session:
-                result = await session.run(query, parsed_params)
-                summary = result.summary()
-                
-                counters = {
-                    "nodes_created": summary.counters.nodes_created,
-                    "nodes_deleted": summary.counters.nodes_deleted,
-                    "relationships_created": summary.counters.relationships_created,
-                    "relationships_deleted": summary.counters.relationships_deleted,
-                    "properties_set": summary.counters.properties_set
-                }
-                
-                return json.dumps(counters, indent=2)
-        except Exception as e:
-            return f"Error executing write query: {e}"
-    
-    def _is_read_query(self, query: str) -> bool:
-        """Check if the query is a read-only query."""
-        write_keywords = r'\b(MERGE|CREATE|SET|DELETE|REMOVE|ADD)\b'
-        return not re.search(write_keywords, query, re.IGNORECASE)
-    
-    def _is_write_query(self, query: str) -> bool:
-        """Check if the query is a write query."""
-        write_keywords = r'\b(MERGE|CREATE|SET|DELETE|REMOVE|ADD)\b'
-        return re.search(write_keywords, query, re.IGNORECASE) is not None
+            self.logger.error(f"Error getting schema: {e}")
+            return "Schema unavailable"
     
     async def _get_node_count(self) -> int:
         """Get total number of nodes in the graph."""
         try:
-            async with self.neo4j_driver.session() as session:
-                result = await session.run("MATCH (n) RETURN count(n) as count")
-                record = await result.single()
+            with self.neo4j_driver.session() as session:
+                result = session.run("MATCH (n) RETURN count(n) as count")
+                record = result.single()
                 return record["count"] if record else 0
         except Exception as e:
             self.logger.error(f"Error getting node count: {e}")
             return 0
     
     async def _load_sample_content(self):
-        """Load sample content into the graph if it's empty."""
+        """Load sample content with embeddings for demonstration."""
         try:
-            async with self.neo4j_driver.session() as session:
-                # Create main Healthee node
-                await session.run("""
+            with self.neo4j_driver.session() as session:
+                # Create main company node
+                session.run("""
                     MERGE (h:Company {name: 'Healthee'})
                     SET h.description = $description,
                         h.type = 'health_benefits_platform',
                         h.updated_at = datetime()
                 """, description="Technology-driven health benefits platform")
                 
-                # Create feature nodes
-                features = [
-                    "AI Assistant Zoe",
-                    "Benefits Navigation", 
-                    "Plan Comparison",
-                    "Wellness Tools",
-                    "Cost Savings",
-                    "Real-time Support"
+                # Create feature nodes with sample text chunks
+                features_data = [
+                    {"name": "AI Assistant Zoe", "text": "Zoe is an AI-powered assistant that helps employees navigate their health benefits with personalized guidance and real-time support."},
+                    {"name": "Benefits Navigation", "text": "Comprehensive benefits navigation system that simplifies complex health insurance plans and helps users find the right coverage."},
+                    {"name": "Plan Comparison", "text": "Advanced plan comparison tools that analyze costs, coverage, and benefits to help users make informed decisions."},
+                    {"name": "Wellness Tools", "text": "Integrated wellness tools including health tracking, preventive care reminders, and wellness program management."},
+                    {"name": "Cost Savings", "text": "Intelligent cost optimization features that identify savings opportunities and help reduce healthcare expenses."},
+                    {"name": "Real-time Support", "text": "24/7 real-time support system providing instant answers to benefits questions and claim assistance."}
                 ]
                 
-                for feature in features:
-                    await session.run("""
-                        MERGE (f:Feature {name: $feature})
+                for feature_data in features_data:
+                    # Create feature node
+                    session.run("""
+                        MERGE (f:Feature {name: $name})
                         SET f.category = 'platform_feature',
                             f.updated_at = datetime()
                         WITH f
                         MATCH (h:Company {name: 'Healthee'})
                         MERGE (h)-[:OFFERS]->(f)
-                    """, feature=feature)
+                    """, name=feature_data["name"])
+                    
+                    # Create chunk with embedding
+                    try:
+                        embedding = self.embedder.embed_query(feature_data["text"])
+                        session.run("""
+                            MERGE (c:Chunk {id: $chunk_id})
+                            SET c.text = $text,
+                                c.source = $source,
+                                c.embedding = $embedding,
+                                c.updated_at = datetime()
+                            WITH c
+                            MATCH (f:Feature {name: $feature_name})
+                            MERGE (f)-[:HAS_CHUNK]->(c)
+                        """, 
+                        chunk_id=f"chunk_{feature_data['name'].lower().replace(' ', '_')}",
+                        text=feature_data["text"],
+                        source=f"Feature: {feature_data['name']}",
+                        embedding=embedding,
+                        feature_name=feature_data["name"])
+                    except Exception as e:
+                        self.logger.warning(f"Failed to create embedding for {feature_data['name']}: {e}")
                 
                 # Create stakeholder nodes
                 stakeholders = [
-                    {"name": "Employees", "type": "user_group"},
-                    {"name": "HR Teams", "type": "admin_group"},
-                    {"name": "Organizations", "type": "client_group"}
+                    {"name": "Employees", "type": "user_group", "text": "End users who utilize the platform to manage their health benefits and make informed healthcare decisions."},
+                    {"name": "HR Teams", "type": "admin_group", "text": "Human resources professionals who administer benefits programs and support employee wellness initiatives."},
+                    {"name": "Organizations", "type": "client_group", "text": "Companies and organizations that partner with Healthee to provide comprehensive benefits solutions to their workforce."}
                 ]
                 
                 for stakeholder in stakeholders:
-                    await session.run("""
+                    session.run("""
                         MERGE (s:Stakeholder {name: $name})
                         SET s.type = $type,
                             s.updated_at = datetime()
@@ -431,9 +508,30 @@ The agentic analysis completed {max_iterations} iterations. Here's what was foun
                         MATCH (h:Company {name: 'Healthee'})
                         MERGE (h)-[:SERVES]->(s)
                     """, name=stakeholder["name"], type=stakeholder["type"])
+                    
+                    # Create chunk for stakeholder
+                    try:
+                        embedding = self.embedder.embed_query(stakeholder["text"])
+                        session.run("""
+                            MERGE (c:Chunk {id: $chunk_id})
+                            SET c.text = $text,
+                                c.source = $source,
+                                c.embedding = $embedding,
+                                c.updated_at = datetime()
+                            WITH c
+                            MATCH (s:Stakeholder {name: $stakeholder_name})
+                            MERGE (s)-[:HAS_CHUNK]->(c)
+                        """, 
+                        chunk_id=f"chunk_{stakeholder['name'].lower().replace(' ', '_')}",
+                        text=stakeholder["text"],
+                        source=f"Stakeholder: {stakeholder['name']}",
+                        embedding=embedding,
+                        stakeholder_name=stakeholder["name"])
+                    except Exception as e:
+                        self.logger.warning(f"Failed to create embedding for {stakeholder['name']}: {e}")
                 
                 # Create specific relationships
-                await session.run("""
+                session.run("""
                     MATCH (zoe:Feature {name: 'AI Assistant Zoe'})
                     MATCH (emp:Stakeholder {name: 'Employees'})
                     MERGE (zoe)-[:ASSISTS]->(emp)
@@ -447,34 +545,39 @@ The agentic analysis completed {max_iterations} iterations. Here's what was foun
                     MERGE (nav)-[:INCLUDES]->(comp)
                 """)
                 
-            self.logger.info("Sample content loaded into Neo4j graph")
+            self.logger.info("Sample content with embeddings loaded into Neo4j graph")
                 
         except Exception as e:
             self.logger.error(f"Error loading sample content: {e}")
     
-    # Keep existing interface methods
+    # Legacy interface methods for compatibility
     async def add_knowledge(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """Add new knowledge to the graph using agentic workflow."""
+        """Add new knowledge to the graph using modern GraphRAG components."""
         if not self.initialized:
             return False
         
         try:
-            knowledge_prompt = f"""
-            Please analyze the following content and add relevant nodes and relationships to the knowledge graph:
-
-            Content: {content}
-            Metadata: {json.dumps(metadata or {})}
-
-            Steps:
-            1. First get the current schema to understand existing structure
-            2. Identify key entities, concepts, and relationships in the content
-            3. Create appropriate Cypher queries to add this information to the graph
-            4. Execute the queries to update the graph
-            5. Confirm the additions were successful
-            """
+            # Create embedding for the content
+            embedding = self.embedder.embed_query(content)
             
-            result = await self.invoke(knowledge_prompt)
-            self.logger.info(f"Added knowledge using agentic workflow")
+            # Create chunk in graph
+            chunk_id = f"chunk_{hash(content) % 10000}"
+            with self.neo4j_driver.session() as session:
+                session.run("""
+                    MERGE (c:Chunk {id: $chunk_id})
+                    SET c.text = $content,
+                        c.source = $source,
+                        c.embedding = $embedding,
+                        c.metadata = $metadata,
+                        c.updated_at = datetime()
+                """, 
+                chunk_id=chunk_id,
+                content=content,
+                source=metadata.get("source", "Manual input") if metadata else "Manual input",
+                embedding=embedding,
+                metadata=json.dumps(metadata or {}))
+            
+            self.logger.info(f"Added knowledge chunk: {chunk_id}")
             return True
             
         except Exception as e:
@@ -482,94 +585,99 @@ The agentic analysis completed {max_iterations} iterations. Here's what was foun
             return False
     
     async def explore_concept(self, concept_name: str) -> Dict[str, Any]:
-        """Explore a specific concept using agentic workflow."""
+        """Explore a concept using modern GraphRAG retrievers."""
         if not self.initialized:
             return {"error": "Not initialized"}
         
         try:
-            explore_prompt = f"""
-            Please explore the concept '{concept_name}' in the Neo4j graph:
-            
-            1. First get the schema to understand the graph structure
-            2. Search for nodes related to '{concept_name}'
-            3. Find all relationships and connected concepts
-            4. Provide a comprehensive analysis of this concept's role in the graph
-            5. Include specific examples and connections found
-            """
-            
-            result = await self.invoke(explore_prompt)
+            # Use semantic search (synchronous call)
+            result = self.graph_rag.search(
+                query_text=f"Tell me about {concept_name} and its relationships",
+                retriever_config={"top_k": 5},
+                return_context=True
+            )
             
             return {
                 "concept": concept_name,
-                "analysis": result,
-                "framework": "agentic_workflow"
+                "analysis": result.answer,
+                "context_items": len(result.retriever_result.items) if result.retriever_result else 0,
+                "framework": "neo4j-graphrag"
             }
             
         except Exception as e:
             return {"error": str(e)}
     
     def get_info(self) -> Dict[str, Any]:
-        """Get Agentic Graph RAG bot information."""
+        """Get Modern Graph RAG bot information."""
         info = super().get_info()
         info.update({
             "initialized": self.initialized,
             "database_type": "neo4j",
-            "framework": "openai_function_calling",
+            "framework": "neo4j-graphrag + fastmcp",
             "capabilities": [
-                "agentic_reasoning", 
-                "graph_schema_analysis", 
-                "cypher_query_generation",
-                "multi_turn_reasoning",
-                "knowledge_graph_management"
+                "semantic_search", 
+                "cypher_queries", 
+                "hybrid_search",
+                "mcp_tools",
+                "modern_retrievers",
+                "vector_embeddings"
+            ],
+            "mcp_tools": [
+                "semantic_search",
+                "cypher_query", 
+                "hybrid_search",
+                "get_graph_schema",
+                "analyze_concept"
             ]
         })
         return info
     
     async def get_stats(self) -> Dict[str, Any]:
-        """Get Agentic Graph RAG bot statistics."""
+        """Get Modern Graph RAG bot statistics."""
         if not self.initialized:
             return {"error": "Not initialized"}
         
         try:
-            stats_prompt = """
-            Please analyze the current Neo4j graph and provide comprehensive statistics including:
-            1. Get the schema to understand node types and relationships
-            2. Count nodes by type
-            3. Count relationships by type
-            4. Identify the most connected nodes
-            5. Provide a summary of the graph structure
-            
-            Format the response as a clear summary of the graph statistics.
-            """
-            
-            result = await self.invoke(stats_prompt)
             node_count = await self._get_node_count()
+            
+            # Get chunk count
+            with self.neo4j_driver.session() as session:
+                result = session.run("MATCH (c:Chunk) RETURN count(c) as chunk_count")
+                record = result.single()
+                chunk_count = record["chunk_count"] if record else 0
             
             return {
                 "total_nodes": node_count,
-                "graph_analysis": result,
-                "framework": "openai_function_calling",
-                "neo4j_healthy": await self.health_check()
+                "chunk_nodes": chunk_count,
+                "vector_index": self.vector_index_name,
+                "fulltext_index": self.fulltext_index_name,
+                "framework": "neo4j-graphrag + fastmcp",
+                "neo4j_healthy": await self.health_check(),
+                "mcp_server_active": self.mcp_server is not None
             }
             
         except Exception as e:
             return {"error": str(e)}
     
     async def health_check(self) -> bool:
-        """Check if the Agentic Graph RAG bot is healthy."""
+        """Check if the Modern Graph RAG bot is healthy."""
         if not self.initialized or not self.neo4j_driver:
             return False
         
         try:
-            async with self.neo4j_driver.session() as session:
-                await session.run("RETURN 1")
+            with self.neo4j_driver.session() as session:
+                session.run("RETURN 1")
             return True
         except Exception:
             return False
     
+    def get_mcp_server(self) -> Optional[FastMCP]:
+        """Get the FastMCP server instance for external usage."""
+        return self.mcp_server
+    
     async def close(self):
-        """Close Agentic Graph RAG bot resources."""
+        """Close Modern Graph RAG bot resources."""
         if self.neo4j_driver:
-            await self.neo4j_driver.close()
+            self.neo4j_driver.close()
         self.initialized = False
-        self.logger.info("Agentic Graph RAG bot resources closed")
+        self.logger.info("Modern Graph RAG bot resources closed")
