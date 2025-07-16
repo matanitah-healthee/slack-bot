@@ -1,0 +1,19 @@
+slack-sdk==3.29.0
+slack-bolt==1.18.1
+streamlit==1.31.0
+openai==1.12.0
+anthropic==0.18.1
+python-dotenv==1.0.1
+requests==2.31.0
+fastapi==0.109.2
+uvicorn==0.27.1
+pydantic
+
+# Simplified database dependencies (focus on core functionality)
+# Note: This will disable some features but allows basic testing
+# asyncpg and pgvector removed temporarily
+# sentence-transformers replaced with simpler alternatives
+
+# For basic text processing
+beautifulsoup4==4.12.3
+numpy==1.26.3 

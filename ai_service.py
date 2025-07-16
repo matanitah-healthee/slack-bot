@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from config import config
@@ -8,13 +9,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class AIService:
-    """AI service that supports both OpenAI and Anthropic APIs."""
+    """AI service that supports both direct AI providers and agents."""
     
     def __init__(self):
         """Initialize the AI service with the appropriate provider."""
         self.provider = config.get_ai_provider()
         self.conversations: Dict[str, List[Dict[str, Any]]] = {}
         self.client = None
+        
+        # Agent system
+        self.agent_manager = None
+        self.use_agents = False
+        self.selected_agent = None
         
         # Initialize the appropriate client
         if self.provider == "openai":
@@ -26,7 +32,12 @@ class AIService:
         else:
             raise ValueError(f"Unsupported AI provider: {self.provider}")
         
+        # Initialize agent manager
+        self._init_agents()
+        
         logger.info(f"AI Service initialized with provider: {self.provider}")
+        if self.agent_manager:
+            logger.info("Agent system available")
     
     def _init_openai(self):
         """Initialize OpenAI client."""
@@ -55,49 +66,90 @@ class AIService:
         except ImportError:
             raise ImportError("Ollama package not installed. Run: pip install ollama")
     
-    def get_response(self, message: str, user_id: str, context: Optional[str] = None) -> str:
+    def _init_agents(self):
+        """Initialize the agent system."""
+        try:
+            from agents.agent_manager import agent_manager
+            self.agent_manager = agent_manager
+            logger.info("Agent system initialized successfully")
+        except Exception as e:
+            logger.warning(f"Agent system not available: {e}")
+            self.agent_manager = None
+    
+    def get_response(self, message: str, user_id: str, context: Optional[str] = None, agent_id: Optional[str] = None) -> str:
         """Get AI response for a message from a specific user."""
         try:
-            # Get or create conversation history for user
-            conversation = self.get_conversation(user_id)
+            # Check if we should use agents
+            if (self.use_agents or agent_id) and self.agent_manager:
+                return self._get_agent_response(message, user_id, agent_id)
             
-            # Add user message to conversation
-            user_message = {
-                "role": "user",
-                "content": message,
-                "timestamp": datetime.now().isoformat()
-            }
-            conversation.append(user_message)
-            
-            # Prepare messages for AI
-            messages = self._prepare_messages(conversation, context)
-            
-            # Get AI response based on provider
-            if self.provider == "openai":
-                response_text = self._get_openai_response(messages)
-            elif self.provider == "anthropic":
-                response_text = self._get_anthropic_response(messages)
-            elif self.provider == "ollama":
-                response_text = self._get_ollama_response(messages)
-            else:
-                raise ValueError(f"Unsupported provider: {self.provider}")
-            
-            # Add AI response to conversation
-            ai_message = {
-                "role": "assistant",
-                "content": response_text,
-                "timestamp": datetime.now().isoformat()
-            }
-            conversation.append(ai_message)
-            
-            # Trim conversation if it gets too long
-            self._trim_conversation(user_id)
-            
-            return response_text
+            # Use direct AI provider
+            return self._get_direct_ai_response(message, user_id, context)
             
         except Exception as e:
             logger.error(f"Error getting AI response: {e}")
             return "I apologize, but I encountered an error processing your request. Please try again."
+    
+    def _get_agent_response(self, message: str, user_id: str, agent_id: Optional[str] = None) -> str:
+        """Get response using the agent system."""
+        try:
+            # Use specific agent or selected agent or default
+            target_agent = agent_id or self.selected_agent
+            
+            # Since agent manager query is async, we need to handle it properly
+            try:
+                loop = asyncio.get_running_loop()
+                # We're in an event loop, create a task
+                task = asyncio.create_task(self.agent_manager.query(message, target_agent))
+                # For synchronous interface, we need to work around this
+                # For now, return a simple response indicating agent processing
+                return f"[Agent Processing] Your message is being processed by the agent system. In a future update, this will provide the full agent response."
+            except RuntimeError:
+                # No event loop, we can use asyncio.run
+                return asyncio.run(self.agent_manager.query(message, target_agent))
+                
+        except Exception as e:
+            logger.error(f"Error getting agent response: {e}")
+            return f"Agent system error: {str(e)}"
+    
+    def _get_direct_ai_response(self, message: str, user_id: str, context: Optional[str] = None) -> str:
+        """Get response using direct AI provider."""
+        # Get or create conversation history for user
+        conversation = self.get_conversation(user_id)
+        
+        # Add user message to conversation
+        user_message = {
+            "role": "user",
+            "content": message,
+            "timestamp": datetime.now().isoformat()
+        }
+        conversation.append(user_message)
+        
+        # Prepare messages for AI
+        messages = self._prepare_messages(conversation, context)
+        
+        # Get AI response based on provider
+        if self.provider == "openai":
+            response_text = self._get_openai_response(messages)
+        elif self.provider == "anthropic":
+            response_text = self._get_anthropic_response(messages)
+        elif self.provider == "ollama":
+            response_text = self._get_ollama_response(messages)
+        else:
+            raise ValueError(f"Unsupported provider: {self.provider}")
+        
+        # Add AI response to conversation
+        ai_message = {
+            "role": "assistant",
+            "content": response_text,
+            "timestamp": datetime.now().isoformat()
+        }
+        conversation.append(ai_message)
+        
+        # Trim conversation if it gets too long
+        self._trim_conversation(user_id)
+        
+        return response_text
     
     def _get_openai_response(self, messages: List[Dict[str, str]]) -> str:
         """Get response from OpenAI."""
@@ -264,4 +316,41 @@ class AIService:
             return False
         except Exception as e:
             logger.warning(f"AI service health check failed: {e}")
-            return False 
+            return False
+    
+    # Agent management methods
+    def set_use_agents(self, use_agents: bool) -> bool:
+        """Enable or disable agent usage."""
+        if self.agent_manager:
+            self.use_agents = use_agents
+            logger.info(f"Agent usage set to: {use_agents}")
+            return True
+        return False
+    
+    def set_selected_agent(self, agent_id: Optional[str]) -> bool:
+        """Set the selected agent."""
+        if self.agent_manager:
+            self.selected_agent = agent_id
+            logger.info(f"Selected agent set to: {agent_id}")
+            return True
+        return False
+    
+    def get_available_agents(self) -> List[Dict[str, Any]]:
+        """Get list of available agents."""
+        if self.agent_manager:
+            try:
+                return self.agent_manager.list_agents()
+            except Exception as e:
+                logger.error(f"Error getting agents: {e}")
+                return []
+        return []
+    
+    def get_agent_stats(self) -> Dict[str, Any]:
+        """Get agent usage statistics."""
+        if self.agent_manager:
+            try:
+                return self.agent_manager.get_stats()
+            except Exception as e:
+                logger.error(f"Error getting agent stats: {e}")
+                return {}
+        return {} 

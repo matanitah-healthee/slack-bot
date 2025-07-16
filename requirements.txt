@@ -9,6 +9,18 @@ requests==2.31.0
 fastapi==0.109.2
 uvicorn==0.27.1
 pydantic
-asyncio==3.4.3
-logging 
-dotenv
+
+# Database dependencies
+pg8000==1.31.2
+pgvector==0.2.4
+
+# Graph database
+neo4j==5.16.0
+
+# Embeddings and text processing
+sentence-transformers==2.7.0
+numpy==1.26.3
+scikit-learn==1.4.0
+
+# Text chunking and processing
+beautifulsoup4==4.12.3
