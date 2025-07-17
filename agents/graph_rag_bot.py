@@ -12,6 +12,7 @@ from neo4j_graphrag.embeddings import Embedder
 from neo4j_graphrag.indexes import create_vector_index, create_fulltext_index
 from .abstract_agent import AbstractAgent
 from config import config
+from utils.embedding_utils import TextEmbedder
 
 logger = logging.getLogger(__name__)
 
@@ -47,20 +48,29 @@ class CustomOllamaLLM(LLMInterface):
         """Async invoke method - just calls sync version."""
         return self.invoke(input_text)
 
-class CustomOllamaEmbeddings(Embedder):
-    """Custom Ollama embeddings implementation for neo4j-graphrag compatibility."""
+class CustomSentenceTransformerEmbeddings(Embedder):
+    """Custom SentenceTransformer embeddings implementation for neo4j-graphrag compatibility.
+    Uses the same embedding model as rag_bot for consistency."""
     
-    def __init__(self, model: str = "nomic-embed-text", host: str = "http://localhost:11434"):
-        self.model = model
-        self.host = host
+    def __init__(self, model_name: Optional[str] = None):
+        self.embedder = TextEmbedder(model_name)
+        self.initialized = False
+    
+    def _ensure_initialized(self):
+        """Ensure the embedder is initialized."""
+        if not self.initialized:
+            success = self.embedder.initialize()
+            if not success:
+                raise RuntimeError("Failed to initialize embedding model")
+            self.initialized = True
     
     def embed_query(self, text: str) -> List[float]:
         """Synchronous embedding method."""
         try:
-            response = ollama.embeddings(model=self.model, prompt=text)
-            return response["embedding"]
+            self._ensure_initialized()
+            return self.embedder.embed_text(text)
         except Exception as e:
-            logger.error(f"Ollama embeddings error: {e}")
+            logger.error(f"SentenceTransformer embeddings error: {e}")
             return []
     
     async def aembed_query(self, text: str) -> List[float]:
@@ -113,10 +123,9 @@ class GraphRagBot(AbstractAgent):
                 num_predict=2000,
             )
             
-            # Initialize embedder with custom implementation (use dedicated embedding model)
-            self.embedder = CustomOllamaEmbeddings(
-                model="nomic-embed-text",  # Use dedicated embedding model
-                host=config.OLLAMA_BASE_URL
+            # Initialize embedder with custom implementation (use same model as rag_bot)
+            self.embedder = CustomSentenceTransformerEmbeddings(
+                model_name=config.EMBEDDING_MODEL  # Use same embedding model as rag_bot
             )
             
             # Setup vector indexes if they don't exist
@@ -125,13 +134,13 @@ class GraphRagBot(AbstractAgent):
             # Initialize retrievers
             await self._initialize_retrievers()
             
-            # Initialize FastMCP server
-            await self._initialize_mcp_server()
-            
-            # Load sample content if graph is empty
+            # Load sample content if database is empty
             node_count = await self._get_node_count()
             if node_count == 0:
                 await self._load_sample_content()
+            
+            # Initialize FastMCP server
+            await self._initialize_mcp_server()
             
             self.initialized = True
             self.logger.info(f"Modern Graph RAG bot initialized successfully with {node_count} nodes")
@@ -139,6 +148,8 @@ class GraphRagBot(AbstractAgent):
             
         except Exception as e:
             self.logger.error(f"Error initializing Modern Graph RAG bot: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     async def _test_neo4j_connection(self):
@@ -160,7 +171,7 @@ class GraphRagBot(AbstractAgent):
                 self.vector_index_name,
                 label="Chunk",
                 embedding_property="embedding",
-                dimensions=768,  # nomic-embed-text embedding dimension
+                dimensions=config.EMBEDDING_DIMENSION,  # Use config embedding dimension (384)
                 similarity_fn="cosine"
             )
             
