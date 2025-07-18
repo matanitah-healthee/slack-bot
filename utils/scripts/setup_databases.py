@@ -12,6 +12,11 @@ import sys
 import os
 from typing import Dict, Any
 
+# Add project root to Python path for imports
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.join(script_dir, '..', '..')
+sys.path.insert(0, os.path.abspath(project_root))
+
 async def check_postgres_connection():
     """Check if PostgreSQL with pgvector is available."""
     try:
@@ -51,14 +56,20 @@ def setup_postgresql_docker():
     print("🐳 Setting up PostgreSQL with pgvector using Docker...")
     
     try:
-        # Check if docker-compose.yml exists
-        if not os.path.exists('docker-compose.yml'):
-            print("❌ docker-compose.yml not found. Creating one...")
-            create_docker_compose()
+        # Check if docker-compose.yml exists in project root
+        project_root = os.path.join(os.path.dirname(__file__), '..', '..')
+        docker_compose_path = os.path.join(project_root, 'docker-compose.yml')
         
-        # Start PostgreSQL with pgvector
-        result = subprocess.run(['docker-compose', 'up', '-d'], 
-                              capture_output=True, text=True)
+        if not os.path.exists(docker_compose_path):
+            print("❌ docker-compose.yml not found in project root!")
+            print("   Expected location: docker-compose.yml")
+            return False
+        
+        print("✅ Found existing docker-compose.yml, using it...")
+        
+        # Start PostgreSQL with pgvector from project root
+        result = subprocess.run(['docker-compose', 'up', '-d', 'postgres'], 
+                              capture_output=True, text=True, cwd=project_root)
         
         if result.returncode == 0:
             print("✅ PostgreSQL with pgvector started successfully")
@@ -118,40 +129,17 @@ def setup_neo4j_docker():
         print(f"❌ Error setting up Neo4j: {e}")
         return False
 
-def create_docker_compose():
-    """Create a docker-compose.yml file for PostgreSQL with pgvector."""
-    docker_compose_content = """version: '3.8'
-
-services:
-  postgres:
-    image: pgvector/pgvector:pg16
-    container_name: postgres-pgvector
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: vectordb
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./init-pgvector.sql:/docker-entrypoint-initdb.d/init-pgvector.sql
-    restart: unless-stopped
-
-volumes:
-  postgres_data:
-"""
-    
-    with open('docker-compose.yml', 'w') as f:
-        f.write(docker_compose_content)
-    
-    print("✅ Created docker-compose.yml")
 
 def install_dependencies():
     """Install required Python dependencies."""
     print("📦 Installing Python dependencies...")
     
     try:
-        result = subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'], 
+        # Use project root path for requirements.txt
+        project_root = os.path.join(os.path.dirname(__file__), '..', '..')
+        requirements_path = os.path.join(project_root, 'requirements.txt')
+        
+        result = subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', requirements_path], 
                               capture_output=True, text=True)
         
         if result.returncode == 0:
@@ -183,14 +171,22 @@ async def test_agent_initialization():
                     if success:
                         print(f"✅ {agent_info['name']} initialized successfully")
                         
-                        # Get stats if available
+                        # Get stats if available (check if method exists)
                         if hasattr(agent, 'get_stats') and callable(getattr(agent, 'get_stats')):
-                            stats = await agent.get_stats()
-                            print(f"   Stats: {stats}")
+                            try:
+                                stats = await agent.get_stats()
+                                print(f"   Stats: {stats}")
+                            except Exception:
+                                # Method might not be implemented in all agents
+                                pass
                         
-                        # Close the agent
-                        if hasattr(agent, 'close'):
-                            await agent.close()
+                        # Close the agent if method exists
+                        if hasattr(agent, 'close') and callable(getattr(agent, 'close')):
+                            try:
+                                await agent.close()
+                            except Exception:
+                                # Method might not be implemented in all agents
+                                pass
                     else:
                         print(f"❌ {agent_info['name']} initialization failed")
                 except Exception as e:
