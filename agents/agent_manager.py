@@ -35,7 +35,10 @@ class AgentManager:
             self.register_agent("rag", rag_bot, set_as_default=True)
             
             # Create Graph RAG bot
-            graph_rag_bot = GraphRagBot()
+            graph_rag_bot = GraphRagBot(
+                name="Graph RAG Bot",
+                description="Graph-based Retrieval-Augmented Generation Bot for healthcare claims analysis"
+            )
             self.register_agent("graph_rag", graph_rag_bot)
             
             logger.info("Default agents initialized successfully")

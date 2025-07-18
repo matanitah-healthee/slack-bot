@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Graph RAG Bot Test with Knowledge Graph Analysis
+Healthcare Claims Graph RAG Bot Test
 
 This script tests the Graph RAG bot with Neo4j knowledge graph operations
-including concept extraction, relationship analysis, and graph traversal.
+focusing on healthcare claims data including patient queries, provider analysis,
+and healthcare relationship discovery using Text2Cypher capabilities.
 """
 
 import asyncio
@@ -45,91 +46,70 @@ async def test_graph_rag_system():
         stats = await graph_bot.get_stats()
         logger.info(f"Initial graph stats: {stats}")
         
-        # Test queries focusing on graph traversal and concept relationships
+        # Test 15 queries focusing on healthcare claims and patient data
         test_queries = [
-            "What is Healthee?",
-            "Tell me about Zoe",
-            "How are benefits and AI connected?",
-            "What features does the platform have?",
-            "Explain the relationship between employees and wellness",
-            "healthee AI assistant",
-            "benefits navigation platform"
+            "How many patients are over 50 years old?",
+            "Which patients have submitted claims amounting to more than $1000?",
+            "What is the total claim amount for married patients?",
+            "How many claims were submitted online in 2024?",
+            "Which providers specialize in Cardiology?",
+            "How many emergency claims were approved?",
+            "What are the most common diagnosis codes for patients under 30?",
+            "How many unemployed patients have claims pending?",
+            "What is the average claim amount for outpatient claims?",
+            "Which providers have treated patients with an income over $100,000?",
+            "What is the gender distribution of patients with denied claims?",
+            "How many patients have multiple claims?",
+            "What is the total claim amount by provider specialty?",
+            "Which patients over 65 have emergency claims?",
+            "What are the top 5 procedure codes by frequency?"
         ]
         
-        logger.info("\n=== TESTING GRAPH QUERIES ===")
+        logger.info("\n=== TESTING CLAIMS QUERIES ===")
         
         for query in test_queries:
-            logger.info(f"\nTesting graph query: '{query}'")
+            logger.info(f"\nTesting claims query: '{query}'")
             
             try:
                 response = await graph_bot.invoke(query)
                 logger.info(f"Response length: {len(response)} characters")
                 
-                # Check response type
-                if "No relevant concepts found" in response:
-                    logger.warning(f"⚠️  No graph concepts found for: {query}")
-                elif "Graph RAG Bot Response" in response:
-                    logger.info(f"✅ Found graph concepts for: {query}")
-                    logger.info(f"Response preview: {response[:300]}...")
+                # Check if response looks like a Cypher query (expected output)
+                if "MATCH" in response and "RETURN" in response:
+                    logger.info("✅ Generated Cypher query")
+                    logger.info(f"Query: {response}")
+                elif "error" in response.lower():
+                    logger.warning(f"⚠️  Error in response: {response}")
                 else:
-                    logger.info(f"🔍 Unexpected response format for: {query}")
+                    logger.info(f"🔍 Response: {response}")
                 
             except Exception as e:
                 logger.error(f"❌ Error with query '{query}': {e}")
         
-        # Test concept exploration
-        logger.info("\n=== TESTING CONCEPT EXPLORATION ===")
+        # Test specific healthcare data queries
+        logger.info("\n=== TESTING SPECIFIC HEALTHCARE SCENARIOS ===")
         
-        concept_tests = ["Healthee", "AI", "benefits", "platform"]
+        healthcare_scenarios = [
+            "Show me all patients with high-value claims",
+            "Find providers treating multiple patients", 
+            "What claims are still pending approval?",
+            "Which diagnosis codes appear most frequently?",
+            "How many claims were denied last month?"
+        ]
         
-        for concept_name in concept_tests:
-            logger.info(f"\nExploring concept: '{concept_name}'")
-            
+        for scenario in healthcare_scenarios:
+            logger.info(f"\nTesting scenario: '{scenario}'")
             try:
-                exploration = await graph_bot.explore_concept(concept_name)
+                response = await graph_bot.invoke(scenario)
+                logger.info(f"Response length: {len(response)} characters")
                 
-                if "error" in exploration:
-                    logger.warning(f"⚠️  Could not explore concept '{concept_name}': {exploration['error']}")
+                if "MATCH" in response and "RETURN" in response:
+                    logger.info("✅ Generated Cypher query for scenario")
                 else:
-                    logger.info(f"✅ Explored concept '{concept_name}':")
-                    logger.info(f"  - Related concepts: {len(exploration.get('related_concepts', []))}")
-                    logger.info(f"  - Relationships: {len(exploration.get('relationships', []))}")
-                    logger.info(f"  - Total connections: {exploration.get('total_connections', 0)}")
+                    logger.info(f"🔍 Scenario response: {response}")
                     
             except Exception as e:
-                logger.error(f"❌ Error exploring concept '{concept_name}': {e}")
-        
-        # Test adding new knowledge
-        logger.info("\n=== TESTING KNOWLEDGE ADDITION ===")
-        
-        new_knowledge = """
-        Healthee's AI Assistant Zoe provides 24/7 support to employees.
-        Zoe can help with benefit comparisons, claims processing, and wellness recommendations.
-        The system integrates with HR platforms and provides real-time analytics.
-        """
-        
-        try:
-            success = await graph_bot.add_knowledge(
-                new_knowledge,
-                metadata={
-                    'source': 'test_addition',
-                    'type': 'feature_description',
-                    'category': 'ai_assistant'
-                }
-            )
-            
-            if success:
-                logger.info("✅ Successfully added new knowledge to graph")
-                
-                # Test query on newly added knowledge
-                response = await graph_bot.invoke("Tell me about Zoe's capabilities")
-                logger.info(f"Response to new knowledge query: {len(response)} characters")
-                
-            else:
-                logger.warning("⚠️  Failed to add new knowledge")
-                
-        except Exception as e:
-            logger.error(f"❌ Error adding knowledge: {e}")
+                logger.error(f"❌ Error in scenario '{scenario}': {e}")
         
         # Test graph statistics after additions
         logger.info("\n=== FINAL GRAPH ANALYSIS ===")
@@ -148,45 +128,50 @@ async def test_graph_rag_system():
         healthy = await graph_bot.health_check()
         logger.info(f"Health check: {'✅ Healthy' if healthy else '❌ Unhealthy'}")
         
-        # Test specific graph traversal
-        logger.info("\n=== TESTING GRAPH TRAVERSAL ===")
+        # Test complex healthcare relationship queries  
+        logger.info("\n=== TESTING HEALTHCARE RELATIONSHIP QUERIES ===")
         
-        # Check if we can find relationships between key concepts
-        test_traversals = [
-            "Find connections between Healthee and AI",
-            "Show relationships between employees and benefits",
-            "Explore wellness and platform connections"
+        # Check if we can find relationships between healthcare entities
+        relationship_queries = [
+            "Find patients who have the same provider and similar diagnosis codes",
+            "Show relationships between high-cost claims and provider specialties", 
+            "Connect patients with multiple emergency claims to their providers",
+            "Which diagnosis codes are most common for patients over 65?",
+            "Find patterns between claim submission methods and approval rates"
         ]
         
-        for traversal_query in test_traversals:
-            logger.info(f"\nGraph traversal: '{traversal_query}'")
+        for relationship_query in relationship_queries:
+            logger.info(f"\nHealthcare relationship query: '{relationship_query}'")
             try:
-                response = await graph_bot.invoke(traversal_query)
+                response = await graph_bot.invoke(relationship_query)
                 
-                # Look for graph-specific indicators in response
-                if "Graph Analysis" in response or "Knowledge Graph Insights" in response:
-                    logger.info("✅ Graph traversal response generated")
+                # Look for Cypher query indicators in response
+                if "MATCH" in response and "RETURN" in response:
+                    logger.info("✅ Generated relationship query")
+                    logger.info(f"Cypher: {response}")
+                elif "error" in response.lower():
+                    logger.warning(f"⚠️  Error in relationship query: {response}")
                 else:
-                    logger.warning("⚠️  Response may not include graph traversal insights")
+                    logger.info(f"🔍 Relationship response: {response}")
                     
             except Exception as e:
-                logger.error(f"❌ Error in graph traversal: {e}")
+                logger.error(f"❌ Error in relationship query: {e}")
         
         # Cleanup
         await graph_bot.close()
         
-        logger.info("\n✅ Graph RAG test completed successfully")
+        logger.info("\n✅ Healthcare Claims Graph RAG test completed successfully")
         return True
         
     except Exception as e:
-        logger.error(f"❌ Graph RAG test failed: {e}")
+        logger.error(f"❌ Healthcare Claims Graph RAG test failed: {e}")
         import traceback
         traceback.print_exc()
         return False
 
 async def main():
-    """Run the Graph RAG test."""
-    logger.info("🕸️  Starting Graph RAG Bot Test")
+    """Run the Healthcare Claims Graph RAG test."""
+    logger.info("🏥 Starting Healthcare Claims Graph RAG Bot Test")
     logger.info("=" * 60)
     
     # Check Neo4j configuration
@@ -198,13 +183,14 @@ async def main():
     success = await test_graph_rag_system()
     
     if success:
-        logger.info("\n🎉 All Graph RAG tests passed!")
+        logger.info("\n🎉 All Healthcare Claims Graph RAG tests passed!")
     else:
-        logger.error("\n💥 Some Graph RAG tests failed!")
+        logger.error("\n💥 Some Healthcare Claims Graph RAG tests failed!")
         logger.info("\n🔧 Troubleshooting tips:")
         logger.info("1. Check if Neo4j is running and accessible")
         logger.info("2. Verify Neo4j credentials in config")
-        logger.info("3. Ensure healthee.md file exists for sample data")
+        logger.info("3. Ensure sample healthcare data is loaded")
+        logger.info("4. Check if Ollama is running with llama2 model")
     
     return success
 
